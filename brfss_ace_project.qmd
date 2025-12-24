@@ -1,1 +1,390 @@
+---
+title: "BRFSS 2019: Adverse Childhood Experiences and Adult Health Indicators"
+subtitle: "A reproducible exploratory analysis using a weighted subsample"
+author: "Aryan Bhojani"
+format:
+  pdf:
+    pdf-engine: xelatex
+  html:
+    html-math-method: mathjax
+execute:
+  eval: true
+  echo: true
+  message: false
+  warning: false
+params:
+  brfss_path: "~/Downloads/HW1/data/brfss2019.zip"
+  sample_n: 10000
+  seed: 32221
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(scales)
+```
+
+# Project overview
+
+This project explores whether adverse childhood experiences (ACEs) are associated with adult outcomes captured in the 2019 Behavioral Risk Factor Surveillance System (BRFSS), including self-rated general health, smoking status, and self-reported diagnosis of a depressive disorder. Because BRFSS is extremely large, I use a reproducible weighted subsample and focus on a small set of variables to build a clean analysis dataset and compute descriptive comparisons across subgroups.
+
+# Data import
+```{r}
+selected_vars <- c(
+"_SEX", "_AGEG5YR",
+"GENHLTH", "ACEPRISN",
+"ACEDRUGS", "ACEDRINK",
+"ACEDEPRS", "ADDEPEV3",
+"_SMOKER3", "_LLCPWT"
+)
+
+brfss <- readr::read_csv(
+  params$brfss_path,
+  col_select = tidyselect::all_of(selected_vars)
+)
+
+head(brfss)
+```
+
+# Variable preparation
+Some BRFSS variables begin with underscores and are less convenient to work with directly. I rename them into simpler, more descriptive names.
+
+```{r}
+brfss <- brfss |>
+rename(
+sampling_weights = any_of("_LLCPWT"),
+SEX              = any_of("_SEX"),
+AGEG5YR          = any_of("_AGEG5YR"),
+SMOKER3          = any_of("_SMOKER3")
+)
+```
+
+# Weighted subsample
+To keep computation lightweight while preserving representativeness, I draw a reproducible weighted sample.
+
+```{r}
+set.seed(params$seed)
+
+samp <- brfss |>
+slice_sample(n = params$sample_n, weight_by = sampling_weights)
+
+colMeans(is.na(samp))
+```
+
+# Tidying and recoding
+BRFSS encodes many categorical responses numerically. I convert them to interpretable factor variables using codebook-consistent category labels.
+
+## Age group
+```{r}
+age_codes <- c(
+"1" = "18-24", "2" = "25-29", "3" = "30-34",
+"4" = "35-39", "5" = "40-44", "6" = "45-49",
+"7" = "50-54", "8" = "55-59", "9" = "60-64",
+"10" = "65-69", "11" = "70-74", "12" = "75-79",
+"13" = "80+", "14" = "Unsure/refused/missing"
+)
+
+samp_mod1 <- samp |>
+mutate(
+age_group = factor(
+as.character(AGEG5YR),
+levels = names(age_codes),
+labels = age_codes,
+ordered = TRUE
+)
+)
+
+head(samp_mod1)
+```
+
+## Sex, general health, and smoking status
+```{r}
+sex_codes <- c(
+"1" = "M",
+"2" = "F",
+"7" = "Unsure",
+"9" = "Refused"
+)
+
+samp_mod2 <- samp_mod1 |>
+mutate(
+SEX = factor(
+as.character(SEX),
+levels = names(sex_codes),
+labels = sex_codes
+)
+)
+
+health_codes <- c(
+"1" = "Excellent",
+"2" = "Very good",
+"3" = "Good",
+"4" = "Fair",
+"5" = "Poor",
+"7" = "Unsure",
+"9" = "Refused"
+)
+
+samp_mod3 <- samp_mod2 |>
+mutate(
+GENHLTH = factor(
+as.character(GENHLTH),
+levels = names(health_codes),
+labels = health_codes,
+ordered = TRUE
+)
+)
+
+smoke_codes <- c(
+"1" = "Daily",
+"2" = "Some days",
+"3" = "Former",
+"4" = "Never",
+"9" = "Unsure/refused/missing"
+)
+
+samp_mod4 <- samp_mod3 |>
+mutate(
+SMOKER3 = factor(
+as.character(SMOKER3),
+levels = names(smoke_codes),
+labels = smoke_codes,
+ordered = TRUE
+)
+)
+
+head(samp_mod4)
+```
+
+## Recode ACE items consistently
+ACE items share a common response structure, so I recode them with a single reusable function and apply it across all variables that start with "ACE".
+
+```{r}
+recode_ace <- function(x) {
+case_match(
+as.character(x),
+"1" ~ "Yes",
+"2" ~ "No",
+"7" ~ "Unsure",
+"9" ~ "Refused",
+.default = NA_character_
+) |>
+factor(levels = c("Yes", "No", "Unsure", "Refused"))
+}
+
+samp_mod5 <- samp_mod4 |>
+mutate(across(starts_with("ACE"), recode_ace))
+
+head(samp_mod5)
+```
+
+# Derived indicators
+
+## Any ACE reported
+I define a single indicator that flags whether a respondent answered "Yes" to any ACE item.
+```{r}
+samp_mod7 <- samp_mod5 |>
+mutate(
+adverse_conditions = if_any(
+starts_with("ACE"),
+~ coalesce(. == "Yes", FALSE)
+)
+)
+
+head(samp_mod7)
+```
+
+## ACE missingness and module restriction
+Missing ACE values typically indicate the module was not administered to that respondent. I track this explicitly.
+
+To keep ACE comparisons meaningful, I filter to respondents with complete ACE module responses.
+
+```{r}
+samp_mod8 <- samp_mod7 |>
+mutate(
+adverse_missing = if_any(starts_with("ACE"), ~ is.na(.))
+)
+
+samp_mod9 <- samp_mod8 |>
+filter(!adverse_missing)
+```
+
+## Depression diagnosis indicator
+I convert the depressive disorder item into a logical indicator.
+```{r}
+samp_mod10 <- samp_mod9 |>
+mutate(
+depression = case_match(
+as.character(ADDEPEV3),
+"1" ~ TRUE,
+"2" ~ FALSE,
+"7" ~ NA,
+"9" ~ NA,
+.default = NA
+)
+)
+
+head(samp_mod10)
+```
+
+# Final analysis dataset
+I keep only the cleaned variables and the derived indicators needed for descriptive analysis.
+```{r}
+final_brfss_data <- samp_mod10 |>
+select(
+SEX, age_group, GENHLTH, SMOKER3,
+adverse_conditions, depression
+)
+
+head(final_brfss_data)
+```
+
+# Descriptive results
+
+## Overall ACE prevalence (among ACE-module respondents)
+```{r}
+mean_ace <- mean(final_brfss_data$adverse_conditions, na.rm = TRUE)
+mean_ace
+```
+
+## ACE prevalence by self-rated general health
+```{r}
+ace_health <- final_brfss_data |>
+group_by(GENHLTH) |>
+summarise(
+adverse_conditions = mean(adverse_conditions, na.rm = TRUE),
+missing_GENHLTH    = mean(is.na(GENHLTH)),
+missing_adverse    = mean(is.na(adverse_conditions)),
+.groups = "drop"
+)
+
+print(ace_health, n = 50)
+```
+
+```{r}
+## ACE prevalence by smoking status
+
+ace_smoking <- final_brfss_data |>
+group_by(SMOKER3) |>
+summarise(
+adverse_conditions = mean(adverse_conditions, na.rm = TRUE),
+.groups = "drop"
+) |>
+arrange(SMOKER3)
+
+ace_smoking
+```
+
+```{r}
+## ACE prevalence by depression diagnosis
+
+ace_depression <- final_brfss_data |>
+group_by(depression) |>
+summarise(
+adverse_conditions = mean(adverse_conditions, na.rm = TRUE),
+.groups = "drop"
+)
+
+print(ace_depression, n = 50)
+```
+
+```{r}
+# Stratified check: health vs ACE, accounting for sex
+
+ace_health_sex <- final_brfss_data |>
+group_by(GENHLTH, SEX) |>
+summarise(
+adverse_conditions = mean(adverse_conditions, na.rm = TRUE),
+.groups = "drop"
+)
+
+ace_health_sex_wide <- ace_health_sex |>
+pivot_wider(
+names_from = SEX,
+values_from = adverse_conditions
+)
+
+print(ace_health_sex_wide, n = 50)
+```
+
+# Discussion of results
+```{r, echo=FALSE}
+ace_by_health <- ace_health |> mutate(GENHLTH = as.character(GENHLTH))
+ace_excellent <- ace_by_health |> filter(GENHLTH == "Excellent") |> pull(adverse_conditions)
+ace_poor      <- ace_by_health |> filter(GENHLTH == "Poor")      |> pull(adverse_conditions)
+
+ace_by_smoke <- ace_smoking |> mutate(SMOKER3 = as.character(SMOKER3))
+ace_daily <- ace_by_smoke |> filter(SMOKER3 == "Daily")      |> pull(adverse_conditions)
+ace_some  <- ace_by_smoke |> filter(SMOKER3 == "Some days")  |> pull(adverse_conditions)
+ace_former<- ace_by_smoke |> filter(SMOKER3 == "Former")     |> pull(adverse_conditions)
+ace_never <- ace_by_smoke |> filter(SMOKER3 == "Never")      |> pull(adverse_conditions)
+
+ace_dep_true  <- ace_depression |> filter(depression == TRUE)  |> pull(adverse_conditions)
+ace_dep_false <- ace_depression |> filter(depression == FALSE) |> pull(adverse_conditions)
+
+ace_by_health_sex <- ace_health_sex_wide |> mutate(GENHLTH = as.character(GENHLTH))
+poor_m <- ace_by_health_sex |> filter(GENHLTH == "Poor") |> pull(M)
+poor_f <- ace_by_health_sex |> filter(GENHLTH == "Poor") |> pull(F)
+exc_m  <- ace_by_health_sex |> filter(GENHLTH == "Excellent") |> pull(M)
+exc_f  <- ace_by_health_sex |> filter(GENHLTH == "Excellent") |> pull(F)
+
+```
+Using the filtered ACE-module respondents in this subsample, the overall prevalence of reporting at least one ACE is `r scales::percent(mean_ace, accuracy = 0.1)`. This value should be interpreted as a descriptive summary for this analysis subset (not a causal statement).
+
+# Relationship with self-rated general health
+
+There is a clear gradient between self-rated health and ACE reporting. Respondents in excellent health report >=1 ACE at about `r scales::percent(ace_excellent, accuracy = 0.1)`, while respondents in poor health report >=1 ACE at about `r scales::percent(ace_poor, accuracy = 0.1)`. In other words, ACE reporting is substantially more common among those reporting worse general health. This pattern is consistent with the idea that early-life adversity is associated with later-life health risks, though this analysis does not establish direction or causality.
+
+# Relationship with smoking status
+
+ACE reporting also varies by smoking category. In this subsample, the prevalence is highest among current smokers: daily smokers are at about `r scales::percent(ace_daily, accuracy = 0.1)` and some-days smokers are at about `r scales::percent(ace_some, accuracy = 0.1)`. Former smokers are lower (`r scales::percent(ace_former, accuracy = 0.1)`) and never smokers are lowest (`r scales::percent(ace_never, accuracy = 0.1)`). This suggests that ACE exposure is more common among groups with higher smoking prevalence, which could reflect long-run behavioral or socioeconomic pathways that are not measured here.
+
+# Relationship with depression diagnosis
+
+The largest contrast appears for depression diagnosis. Respondents who report a depressive disorder diagnosis have ACE prevalence around `r scales::percent(ace_dep_true, accuracy = 0.1)`, compared to about `r scales::percent(ace_dep_false, accuracy = 0.1)` among those without a diagnosis. This is a strong descriptive association in the survey responses and motivates deeper modeling that adjusts for confounders.
+
+# Stratified comparison by sex
+
+When stratifying the health gradient by sex, the overall pattern remains: ACE prevalence tends to be higher in worse health categories for both groups. For example, in excellent health the prevalence is about M: `r scales::percent(exc_m, accuracy = 0.1)` vs F: `r scales::percent(exc_f, accuracy = 0.1)`, and in poor health it is about M: `r scales::percent(poor_m, accuracy = 0.1)` vs F: `r scales::percent(poor_f, accuracy = 0.1)`. Because these are subgroup summaries from a subsample, differences should be treated as exploratory rather than definitive. The ‘Unsure’/‘Refused’ categories likely have very small sample sizes, so I do not interpret those subgroup percentages.
+
+Overall, the descriptive results show consistent associations between ACE reporting and multiple adult health indicators in BRFSS 2019. The next section visualizes the health gradient by sex to make this pattern easier to see.
+
+```{r}
+# Visualization
+
+ggplot(ace_health_sex, aes(x = GENHLTH, y = adverse_conditions, fill = SEX)) +
+geom_col(position = "dodge") +
+labs(
+x = "Self-rated general health",
+y = "Proportion reporting \u22651 ACE",
+fill = "Sex",
+title = "ACEs by self-rated health, stratified by sex (BRFSS 2019 subsample)"
+) +
+scale_y_continuous(limits = c(0, 1), labels = scales::percent_format(accuracy = 1)) +
+theme_minimal()
+```
+
+# Interpretation
+
+Across respondents who were administered the ACE module, the descriptive summaries suggest that reporting at least one ACE is associated with:
+
+- poorer self-rated general health
+
+- higher smoking prevalence among current smokers relative to former/never smokers
+
+- higher prevalence among respondents reporting a depressive disorder diagnosis
+
+These patterns are descriptive (non-causal) and reflect associations in the observed survey responses.
+
+# Limitations and next steps
+
+- **Module availability**: ACE questions are not asked everywhere, so this analysis reflects the subset of respondents who received the module.
+
+- **Self-report and nonresponse**: Health and life experiences are self-reported and may include reporting bias.
+
+- **Confounding**: Many plausible confounders (e.g., socioeconomic status, education, race/ethnicity, region) are not included here.
+
+- **Inference scope**: Results here are intended as exploratory summaries rather than population estimates.
+
+Potential next steps include incorporating additional covariates, using survey-weighted estimation end-to-end (rather than only for sampling), and fitting models to adjust for confounding while keeping interpretation appropriately non-causal.
 
